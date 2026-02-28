@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from calendar import monthrange
 from datetime import date
 from typing import Literal
 
@@ -10,18 +11,42 @@ from .query_plan import QueryPlan, Threshold
 
 
 MONTHS = {
+    "январь": 1,
     "января": 1,
+    "январе": 1,
+    "февраль": 2,
     "февраля": 2,
+    "феврале": 2,
+    "март": 3,
     "марта": 3,
+    "марте": 3,
+    "апрель": 4,
     "апреля": 4,
+    "апреле": 4,
+    "май": 5,
     "мая": 5,
+    "мае": 5,
+    "июнь": 6,
     "июня": 6,
+    "июне": 6,
+    "июль": 7,
     "июля": 7,
+    "июле": 7,
+    "август": 8,
     "августа": 8,
+    "августе": 8,
+    "сентябрь": 9,
     "сентября": 9,
+    "сентябре": 9,
+    "октябрь": 10,
     "октября": 10,
+    "октябре": 10,
+    "ноябрь": 11,
     "ноября": 11,
+    "ноябре": 11,
+    "декабрь": 12,
     "декабря": 12,
+    "декабре": 12,
 }
 
 METRIC_ALIASES = {
@@ -44,7 +69,7 @@ DELTA_KEYWORDS = [
 
 DISTINCT_KEYWORDS = ["разных", "уникальных", "различных"]
 
-PUBLISHED_KEYWORDS = ["вышло", "опублик", "загруж", "вылож", "опубликов"]
+PUBLISHED_KEYWORDS = ["вышло", "опублик", "загруж", "вылож", "опубликов", "появил"]
 
 STATE_KEYWORDS = ["на момент", "по состоянию", "к "]
 
@@ -93,6 +118,16 @@ def parse_date_range(text: str) -> tuple[date | None, date | None]:
                 date(int(y2), month2, int(d2)),
             )
 
+    # pattern: за май 2025, в ноябре 2025, за май 2025 года
+    m = re.search(r"(?:за|в)\s+([а-я]+)\s+(\d{4})(?:\s+г(?:од(?:а)?)?)?", text)
+    if m:
+        month_word, year = m.groups()
+        month = MONTHS.get(month_word)
+        if month:
+            y = int(year)
+            last_day = monthrange(y, month)[1]
+            return date(y, month, 1), date(y, month, last_day)
+
     # single date
     m = re.search(r"(\d{1,2})\s+([а-я]+)\s+(\d{4})", text)
     if m:
@@ -124,8 +159,10 @@ def parse_rules(text: str) -> QueryPlan | None:
     t = normalize(text)
 
     metric = detect_metric(t)
-    has_video_word = "видео" in t
-    video_count_intent = re.search(r"(сколько|количество|число)\s+видео", t) is not None
+    has_video_word = any(word in t for word in ["видео", "ролик", "роликов", "ролика", "ролики"])
+    video_count_intent = (
+        re.search(r"(сколько|количество|число)\s+(?:видео|ролик(?:ов|а|и)?)", t) is not None
+    )
 
     distinct = any(word in t for word in DISTINCT_KEYWORDS)
     creator_id = CREATOR_RE.search(t)
@@ -136,7 +173,8 @@ def parse_rules(text: str) -> QueryPlan | None:
 
     threshold = parse_threshold(t, metric)
 
-    is_published = any(word in t for word in PUBLISHED_KEYWORDS)
+    published_hint = any(word in t for word in PUBLISHED_KEYWORDS)
+    is_published = has_video_word and published_hint
     delta_hint = any(word in t for word in DELTA_KEYWORDS)
     state_hint = any(word in t for word in STATE_KEYWORDS)
 
@@ -144,7 +182,9 @@ def parse_rules(text: str) -> QueryPlan | None:
 
     # Decide aggregate
     if any(word in t for word in ["сколько", "количество", "число"]):
-        if video_count_intent:
+        if video_count_intent or (
+            has_video_word and (distinct or threshold is not None or positive_only or is_published)
+        ):
             aggregate = "count"
         elif metric:
             aggregate = "sum"
@@ -170,10 +210,16 @@ def parse_rules(text: str) -> QueryPlan | None:
     else:
         source = "videos"
 
+    # "новые просмотры/лайки/..." для count по видео требует фильтр > 0.
+    if positive_only and threshold is None and metric is not None and source == "snapshots":
+        threshold = Threshold(metric=metric, op=">", value=0)
+
     # Decide metric target
     if aggregate == "count":
         metric_target: Literal["videos", "views", "likes", "comments", "reports"]
-        if video_count_intent or metric is None or threshold is not None:
+        if has_video_word and (video_count_intent or distinct or threshold is not None or positive_only or is_published):
+            metric_target = "videos"
+        elif metric is None or threshold is not None:
             metric_target = "videos"
         elif has_video_word and metric is None:
             metric_target = "videos"
