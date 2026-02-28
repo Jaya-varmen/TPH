@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
-from typing import Iterable
 
-from sqlalchemy import Select, and_, distinct, func, select
+from sqlalchemy import Select, and_, distinct, func, select, text
 
 from .models import videos, video_snapshots
 from .query_plan import QueryPlan
@@ -32,10 +31,8 @@ def _date_bounds(plan: QueryPlan) -> tuple[datetime, datetime] | None:
 
 def build_query(plan: QueryPlan) -> Select:
     if plan.source == "videos":
-        base = videos
         date_col = videos.c.video_created_at
     else:
-        base = video_snapshots
         date_col = video_snapshots.c.created_at
 
     metric_col = _metric_column(plan)
@@ -58,9 +55,15 @@ def build_query(plan: QueryPlan) -> Select:
 
     conditions: list = []
 
-    # Join videos if we need creator_id on snapshots
-    if plan.source == "snapshots" and plan.creator_id:
+    # Join videos for snapshot queries that need publication-based filters.
+    need_videos_join = (
+        plan.source == "snapshots"
+        and (plan.creator_id is not None or plan.hours_after_publication is not None)
+    )
+    if need_videos_join:
         stmt = stmt.select_from(video_snapshots.join(videos, video_snapshots.c.video_id == videos.c.id))
+
+    if plan.source == "snapshots" and plan.creator_id:
         conditions.append(videos.c.creator_id == plan.creator_id)
     elif plan.source == "videos" and plan.creator_id:
         conditions.append(videos.c.creator_id == plan.creator_id)
@@ -69,6 +72,12 @@ def build_query(plan: QueryPlan) -> Select:
     if bounds:
         start, end = bounds
         conditions.append(and_(date_col >= start, date_col < end))
+
+    if plan.source == "snapshots" and plan.hours_after_publication is not None:
+        hours = int(plan.hours_after_publication)
+        interval_expr = text(f"INTERVAL '{hours} hour'")
+        conditions.append(video_snapshots.c.created_at >= videos.c.video_created_at)
+        conditions.append(video_snapshots.c.created_at < videos.c.video_created_at + interval_expr)
 
     if plan.threshold:
         threshold_col = metric_col

@@ -71,10 +71,38 @@ DISTINCT_KEYWORDS = ["разных", "уникальных", "различных
 
 PUBLISHED_KEYWORDS = ["вышло", "опублик", "загруж", "вылож", "опубликов", "появил"]
 
-STATE_KEYWORDS = ["на момент", "по состоянию", "к "]
-
-THRESHOLD_RE = re.compile(r"(больше|более|не менее|>=|меньше|менее|<=)\s*([0-9][0-9 _]*)")
+THRESHOLD_RE = re.compile(
+    r"(не\s+менее|не\s+более|не\s+больше|больше|более|>=|меньше|менее|<=|>|<)\s*([0-9][0-9\s_]*)"
+)
 CREATOR_RE = re.compile(r"\b[0-9a-f]{32}\b")
+HOURS_WORDS = {
+    "один": 1,
+    "одна": 1,
+    "два": 2,
+    "две": 2,
+    "три": 3,
+    "четыре": 4,
+    "пять": 5,
+    "шесть": 6,
+    "семь": 7,
+    "восемь": 8,
+    "девять": 9,
+    "десять": 10,
+    "одиннадцать": 11,
+    "двенадцать": 12,
+    "тринадцать": 13,
+    "четырнадцать": 14,
+    "пятнадцать": 15,
+    "шестнадцать": 16,
+    "семнадцать": 17,
+    "восемнадцать": 18,
+    "девятнадцать": 19,
+    "двадцать": 20,
+    "двадцать один": 21,
+    "двадцать два": 22,
+    "двадцать три": 23,
+    "двадцать четыре": 24,
+}
 
 
 def normalize(text: str) -> str:
@@ -118,8 +146,20 @@ def parse_date_range(text: str) -> tuple[date | None, date | None]:
                 date(int(y2), month2, int(d2)),
             )
 
-    # pattern: за май 2025, в ноябре 2025, за май 2025 года
-    m = re.search(r"(?:за|в)\s+([а-я]+)\s+(\d{4})(?:\s+г(?:од(?:а)?)?)?", text)
+    # pattern: с 1 ноября по 5 ноября 2025
+    m = re.search(r"с\s+(\d{1,2})\s+([а-я]+)\s+по\s+(\d{1,2})\s+([а-я]+)\s+(\d{4})", text)
+    if m:
+        d1, month_word1, d2, month_word2, year = m.groups()
+        month1 = MONTHS.get(month_word1)
+        month2 = MONTHS.get(month_word2)
+        if month1 and month2:
+            return (
+                date(int(year), month1, int(d1)),
+                date(int(year), month2, int(d2)),
+            )
+
+    # pattern: за май 2025, в ноябре 2025, за май 2025г, за май 2025 года
+    m = re.search(r"(?:за|в)\s+([а-я]+)\s+(\d{4})(?:\s*г(?:од(?:а)?)?)?", text)
     if m:
         month_word, year = m.groups()
         month = MONTHS.get(month_word)
@@ -127,6 +167,12 @@ def parse_date_range(text: str) -> tuple[date | None, date | None]:
             y = int(year)
             last_day = monthrange(y, month)[1]
             return date(y, month, 1), date(y, month, last_day)
+
+    # pattern: за 2025 год, в 2025г
+    m = re.search(r"(?:за|в)\s+(\d{4})\s*г(?:од(?:а)?)?", text)
+    if m:
+        y = int(m.group(1))
+        return date(y, 1, 1), date(y, 12, 31)
 
     # single date
     m = re.search(r"(\d{1,2})\s+([а-я]+)\s+(\d{4})", text)
@@ -147,18 +193,51 @@ def parse_threshold(text: str, metric: str | None) -> Threshold | None:
     if not m:
         return None
     raw_op, raw_value = m.groups()
-    value = int(raw_value.replace(" ", "").replace("_", ""))
-    if raw_op in ("больше", "более", ">="):
-        op = ">=" if raw_op == ">=" else ">"
+    digits_only = re.sub(r"\D", "", raw_value)
+    if not digits_only:
+        return None
+    value = int(digits_only)
+    norm = raw_op.strip()
+    if norm in ("больше", "более", ">"):
+        op = ">"
+    elif norm in ("не менее", ">="):
+        op = ">="
+    elif norm in ("меньше", "менее", "<"):
+        op = "<"
+    elif norm in ("не более", "не больше", "<="):
+        op = "<="
     else:
-        op = "<=" if raw_op == "<=" else "<"
+        return None
     return Threshold(metric=metric, op=op, value=value)
+
+
+def parse_hours_after_publication(text: str) -> int | None:
+    # examples:
+    # "за первые 3 часа после публикации"
+    # "за первых 24 часов после публикации"
+    m = re.search(r"перв[а-я]*\s+([а-я]+(?:\s+[а-я]+)?|\d{1,3})\s+час[а-я]*\s+после\s+публик", text)
+    if not m:
+        return None
+    raw_hours = m.group(1).strip()
+    if raw_hours.isdigit():
+        hours = int(raw_hours)
+    else:
+        hours = HOURS_WORDS.get(raw_hours)
+        if hours is None:
+            return None
+    if hours <= 0:
+        return None
+    # Guardrail to avoid unrealistic values from malformed input/LLM.
+    if hours > 720:
+        return 720
+    return hours
 
 
 def parse_rules(text: str) -> QueryPlan | None:
     t = normalize(text)
 
     metric = detect_metric(t)
+    count_question = any(word in t for word in ["сколько", "количество", "число"])
     has_video_word = any(word in t for word in ["видео", "ролик", "роликов", "ролика", "ролики"])
     video_count_intent = (
         re.search(r"(сколько|количество|число)\s+(?:видео|ролик(?:ов|а|и)?)", t) is not None
@@ -172,19 +251,32 @@ def parse_rules(text: str) -> QueryPlan | None:
     has_date = date_from is not None
 
     threshold = parse_threshold(t, metric)
+    hours_after_publication = parse_hours_after_publication(t)
 
     published_hint = any(word in t for word in PUBLISHED_KEYWORDS)
     is_published = has_video_word and published_hint
     delta_hint = any(word in t for word in DELTA_KEYWORDS)
-    state_hint = any(word in t for word in STATE_KEYWORDS)
+    state_hint = (
+        "на момент" in t
+        or "по состоянию" in t
+        or re.search(r"\bк\s+\d{1,2}\s+[а-я]+\s+\d{4}\b", t) is not None
+    )
 
-    positive_only = "новые" in t or "получали" in t or "получили" in t
+    received_metric_hint = (
+        metric is not None
+        and re.search(r"получ[а-я]*\s+(?:[а-я]+\s+){0,4}(?:просмотр|лайк|комментар|жалоб|репорт)", t) is not None
+    )
+
+    # "positive only" applies to intents like "новые просмотры" and count-of-videos questions with "получили X".
+    positive_only = bool(re.search(r"нов[а-я]*\s+(?:просмотр|лайк|комментар|жалоб|репорт)", t))
+    if not positive_only and has_video_word and count_question and received_metric_hint:
+        positive_only = True
 
     # Decide aggregate
-    if any(word in t for word in ["сколько", "количество", "число"]):
-        if video_count_intent or (
-            has_video_word and (distinct or threshold is not None or positive_only or is_published)
-        ):
+    if count_question:
+        if metric is not None and not video_count_intent and threshold is None and not distinct and not positive_only:
+            aggregate = "sum"
+        elif video_count_intent or (has_video_word and (distinct or threshold is not None or positive_only)):
             aggregate = "count"
         elif metric:
             aggregate = "sum"
@@ -203,7 +295,9 @@ def parse_rules(text: str) -> QueryPlan | None:
             return None
 
     # Decide source table
-    if is_published:
+    if hours_after_publication is not None:
+        source = "snapshots"
+    elif is_published:
         source = "videos"
     elif has_date:
         source = "snapshots"
@@ -217,7 +311,7 @@ def parse_rules(text: str) -> QueryPlan | None:
     # Decide metric target
     if aggregate == "count":
         metric_target: Literal["videos", "views", "likes", "comments", "reports"]
-        if has_video_word and (video_count_intent or distinct or threshold is not None or positive_only or is_published):
+        if has_video_word and (video_count_intent or distinct or threshold is not None or positive_only):
             metric_target = "videos"
         elif metric is None or threshold is not None:
             metric_target = "videos"
@@ -230,10 +324,15 @@ def parse_rules(text: str) -> QueryPlan | None:
             return None
         metric_target = metric
 
+    # Snapshot table can contain multiple rows per video per period, so for "count videos"
+    # we should count unique video_ids even if user did not explicitly say "разных".
+    if aggregate == "count" and metric_target == "videos" and source == "snapshots":
+        distinct = True
+
     # Use delta?
     use_delta = False
     if source == "snapshots":
-        if delta_hint or positive_only:
+        if delta_hint or positive_only or hours_after_publication is not None:
             use_delta = True
         elif has_date and metric_target != "videos" and not state_hint:
             # default to per-day growth for metric queries with date
@@ -247,6 +346,7 @@ def parse_rules(text: str) -> QueryPlan | None:
         distinct=distinct,
         date_from=date_from,
         date_to=date_to,
+        hours_after_publication=hours_after_publication,
         creator_id=creator_id_value,
         threshold=threshold,
         positive_only=positive_only,

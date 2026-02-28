@@ -29,6 +29,7 @@ SYSTEM_PROMPT = """
   "distinct": true | false,
   "date_from": "YYYY-MM-DD" | null,
   "date_to": "YYYY-MM-DD" | null,
+  "hours_after_publication": number | null,
   "creator_id": "..." | null,
   "threshold": {"metric": "views|likes|comments|reports", "op": ">|>=|<|<=", "value": number} | null,
   "positive_only": true | false
@@ -40,6 +41,7 @@ SYSTEM_PROMPT = """
 - "Сколько видео" => aggregate=count, metric=videos.
 - "Сколько просмотров/лайков/комментариев/жалоб" => aggregate=sum, metric=views|likes|comments|reports.
 - "Сколько разных/уникальных видео" => distinct=true и metric=videos.
+- "за первые N часов после публикации" => source=snapshots, use_delta=true, hours_after_publication=N.
 - Если указан creator id (32 hex), положи в creator_id.
 - Если есть порог (больше/меньше N просмотров и т.п.), заполни threshold.
 - Если запрос про новые просмотры, поставь positive_only=true.
@@ -77,6 +79,12 @@ def _validate(payload: dict[str, Any]) -> QueryPlan | None:
         distinct = bool(payload["distinct"])
         date_from = _parse_date(payload.get("date_from"))
         date_to = _parse_date(payload.get("date_to"))
+        hours_after_publication_raw = payload.get("hours_after_publication")
+        hours_after_publication = None
+        if hours_after_publication_raw is not None:
+            hours_after_publication = int(hours_after_publication_raw)
+            if hours_after_publication <= 0:
+                return None
         creator_id = payload.get("creator_id") or None
         positive_only = bool(payload.get("positive_only", False))
     except Exception:
@@ -108,6 +116,7 @@ def _validate(payload: dict[str, Any]) -> QueryPlan | None:
         distinct=distinct,
         date_from=date_from,
         date_to=date_to,
+        hours_after_publication=hours_after_publication,
         creator_id=creator_id,
         threshold=threshold,
         positive_only=positive_only,

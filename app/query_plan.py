@@ -21,6 +21,7 @@ class QueryPlan:
     distinct: bool
     date_from: date | None
     date_to: date | None
+    hours_after_publication: int | None
     creator_id: str | None
     threshold: Threshold | None
     positive_only: bool
