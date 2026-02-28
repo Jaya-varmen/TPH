@@ -260,6 +260,7 @@ def parse_rules(text: str) -> QueryPlan | None:
         "на момент" in t
         or "по состоянию" in t
         or re.search(r"\bк\s+\d{1,2}\s+[а-я]+\s+\d{4}\b", t) is not None
+        or re.search(r"\bна\s+\d{1,2}\s+[а-я]+\s+\d{4}\b", t) is not None
     )
 
     received_metric_hint = (
